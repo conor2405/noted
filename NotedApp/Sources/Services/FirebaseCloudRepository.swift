@@ -1,15 +1,12 @@
 import FirebaseFirestore
-import FirebaseStorage
 import Foundation
 
 enum CloudRepositoryError: LocalizedError {
-    case signedOut
-    case missingAudio
+    case missingTranscript
 
     var errorDescription: String? {
         switch self {
-        case .signedOut: "Sign in before uploading recordings."
-        case .missingAudio: "The local audio file could not be found."
+        case .missingTranscript: "The on-device transcript is not ready to sync."
         }
     }
 }
@@ -19,13 +16,11 @@ final class FirebaseCloudRepository {
     typealias PreferencesChangeHandler = @Sendable (Result<String?, Error>) -> Void
 
     private let database: Firestore
-    private let storage: Storage
     private var recordingsListener: ListenerRegistration?
     private var preferencesListener: ListenerRegistration?
 
-    init(database: Firestore = .firestore(), storage: Storage = .storage()) {
+    init(database: Firestore = .firestore()) {
         self.database = database
-        self.storage = storage
     }
 
     deinit {
@@ -74,40 +69,45 @@ final class FirebaseCloudRepository {
             }
     }
 
-    func upload(
+    func syncTranscript(
         meeting: Meeting,
-        audioURL: URL,
         userID: String
     ) async throws {
-        guard FileManager.default.fileExists(atPath: audioURL.path) else {
-            throw CloudRepositoryError.missingAudio
+        guard !meeting.transcript.isEmpty else {
+            throw CloudRepositoryError.missingTranscript
         }
 
         let recordingID = meeting.id.uuidString.lowercased()
-        let storagePath = "recordings/\(userID)/\(recordingID)/source.m4a"
+        let transcriptVersion = "apple-on-device-v1-\(recordingID)"
         let reference = database
             .collection("users")
             .document(userID)
             .collection("recordings")
             .document(recordingID)
-        let storageReference = storage.reference(withPath: storagePath)
 
         let existing = try await reference.getDocument()
+        let existingData = existing.data() ?? [:]
+        if existingData["transcriptionState"] as? String == "completed",
+           existingData["transcriptVersion"] as? String == transcriptVersion,
+           Self.integer(existingData["transcriptSegmentCount"]) == meeting.transcript.count {
+            return
+        }
+
         if existing.exists {
-            let data = existing.data() ?? [:]
-            let uploadState = data["uploadState"] as? String
-            let transcriptionState = data["transcriptionState"] as? String
-            if transcriptionState == "failed" {
-                try? await storageReference.delete()
-            } else {
-                if let uploadState, ["completed", "uploaded", "deleted"].contains(uploadState) {
-                    return
-                }
-                if let transcriptionState,
-                   ["in_progress", "processing", "completed", "ready"].contains(transcriptionState) {
-                    return
-                }
-            }
+            try await reference.updateData([
+                "title": meeting.title,
+                "durationMilliseconds": meeting.durationMilliseconds,
+                "noteInstructions": meeting.noteInstructions,
+                "transcriptVersion": transcriptVersion,
+                "transcriptSegmentCount": meeting.transcript.count,
+                "transcriptSource": "apple_speech_analyzer",
+                "syncState": "in_progress",
+                "transcriptionState": "in_progress",
+                "noteState": "queued",
+                "processingError": FieldValue.delete(),
+                "errorMessage": FieldValue.delete(),
+                "updatedAt": FieldValue.serverTimestamp()
+            ])
         } else {
             try await reference.setData([
                 "ownerUid": userID,
@@ -118,21 +118,50 @@ final class FirebaseCloudRepository {
                 "updatedAt": FieldValue.serverTimestamp(),
                 "durationMilliseconds": meeting.durationMilliseconds,
                 "noteInstructions": meeting.noteInstructions,
-                "audioStoragePath": storagePath,
-                "uploadState": "in_progress",
-                "transcriptionState": "queued",
+                "transcriptVersion": transcriptVersion,
+                "transcriptSegmentCount": meeting.transcript.count,
+                "transcriptSource": "apple_speech_analyzer",
+                "syncState": "in_progress",
+                "transcriptionState": "in_progress",
                 "noteState": "queued",
                 "exportState": "not_started"
             ])
         }
 
-        let metadata = StorageMetadata()
-        metadata.contentType = "audio/mp4"
-        metadata.customMetadata = [
-            "recordingID": recordingID,
-            "ownerID": userID
-        ]
-        _ = try await storageReference.putFileAsync(from: audioURL, metadata: metadata)
+        let transcriptCollection = reference.collection("transcriptChunks")
+        for pageStart in stride(from: 0, to: meeting.transcript.count, by: 400) {
+            let pageEnd = min(pageStart + 400, meeting.transcript.count)
+            let batch = database.batch()
+            for segment in meeting.transcript[pageStart..<pageEnd] {
+                let documentID = String(format: "%06d", segment.sequence)
+                var data: [String: Any] = [
+                    "processingJobId": transcriptVersion,
+                    "sequence": segment.sequence,
+                    "startMilliseconds": segment.startMilliseconds,
+                    "speakerLabel": "",
+                    "text": segment.text,
+                    "confidence": NSNull(),
+                    "languageCode": Locale.current.identifier(.bcp47),
+                    "timestampPrecision": "result",
+                    "source": "apple_speech_analyzer"
+                ]
+                if let endMilliseconds = segment.endMilliseconds {
+                    data["endMilliseconds"] = endMilliseconds
+                }
+                batch.setData(
+                    data,
+                    forDocument: transcriptCollection.document(documentID)
+                )
+            }
+            try await batch.commit()
+        }
+
+        try await reference.updateData([
+            "syncState": "completed",
+            "transcriptionState": "completed",
+            "noteState": "queued",
+            "updatedAt": FieldValue.serverTimestamp()
+        ])
     }
 
     func fetchTranscript(userID: String, meetingID: UUID) async throws -> [TranscriptSegment] {
@@ -298,8 +327,8 @@ final class FirebaseCloudRepository {
             noteVersion: integer(data["noteVersion"]) ?? 0,
             transcript: [],
             pipeline: PipelineState(
-                upload: WorkState(cloudValue: data["uploadState"]),
                 transcription: WorkState(cloudValue: data["transcriptionState"]),
+                sync: WorkState(cloudValue: data["syncState"]),
                 note: WorkState(cloudValue: data["noteState"]),
                 export: WorkState(cloudValue: data["exportState"]),
                 message: errorMessage
@@ -319,7 +348,7 @@ final class FirebaseCloudRepository {
         } else if let speakerNumber = integer(data["speakerTag"]) {
             speaker = "Speaker \(speakerNumber)"
         } else {
-            speaker = "Speaker"
+            speaker = ""
         }
 
         return TranscriptSegment(

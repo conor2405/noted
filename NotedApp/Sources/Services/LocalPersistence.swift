@@ -68,25 +68,27 @@ actor LocalPersistence {
         try write(meetings, to: "meetings.json")
     }
 
-    func loadPendingUploads() -> [PendingUpload] {
-        read([PendingUpload].self, from: "pending-uploads.json") ?? []
+    func loadPendingProcessing() -> [PendingProcessing] {
+        read([PendingProcessing].self, from: "pending-processing.json")
+            ?? read([PendingProcessing].self, from: "pending-uploads.json")
+            ?? []
     }
 
-    func savePendingUploads(_ uploads: [PendingUpload]) throws {
-        try write(uploads, to: "pending-uploads.json")
+    func savePendingProcessing(_ work: [PendingProcessing]) throws {
+        try write(work, to: "pending-processing.json")
     }
 
-    func upsertPendingUpload(_ upload: PendingUpload) throws {
-        var uploads = loadPendingUploads()
-        uploads.removeAll { $0.meetingID == upload.meetingID }
-        uploads.append(upload)
-        try savePendingUploads(uploads)
+    func upsertPendingProcessing(_ item: PendingProcessing) throws {
+        var work = loadPendingProcessing()
+        work.removeAll { $0.meetingID == item.meetingID }
+        work.append(item)
+        try savePendingProcessing(work)
     }
 
-    func removePendingUpload(meetingID: UUID) throws {
-        var uploads = loadPendingUploads()
-        uploads.removeAll { $0.meetingID == meetingID }
-        try savePendingUploads(uploads)
+    func removePendingProcessing(meetingID: UUID) throws {
+        var work = loadPendingProcessing()
+        work.removeAll { $0.meetingID == meetingID }
+        try savePendingProcessing(work)
     }
 
     func loadPendingExports() -> [PendingFolderExport] {

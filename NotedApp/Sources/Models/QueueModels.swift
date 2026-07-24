@@ -1,6 +1,6 @@
 import Foundation
 
-struct PendingUpload: Identifiable, Codable, Hashable, Sendable {
+struct PendingProcessing: Identifiable, Codable, Hashable, Sendable {
     var id: UUID { meetingID }
     var meetingID: UUID
     var ownerUserID: String?

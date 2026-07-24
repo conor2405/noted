@@ -2,23 +2,20 @@
 
 ## 1. Create the Firebase project
 
-Create a Firebase project on the Blaze plan and choose its locations before creating data:
+Create a Firebase project on the Blaze plan and choose locations before creating data:
 
 - Firestore: `eur3`
-- Cloud Storage: a compatible European location
 - Cloud Functions: `europe-west1`
-- Speech-to-Text recognizer: `eu`
-- Vertex AI: `global` by default, or a regional endpoint that supports the configured Gemini model
+- Vertex AI: `global` by default, or a regional endpoint supporting the configured Gemini model
 
 Enable:
 
 - Firebase Authentication
 - Cloud Firestore
-- Cloud Storage
 - Cloud Functions
-- Cloud Tasks
-- Speech-to-Text API
 - Vertex AI API
+
+Cloud Storage, Cloud Tasks, and Speech-to-Text are not part of this architecture.
 
 Copy `.firebaserc.example` to `.firebaserc` and replace the placeholder project ID.
 
@@ -38,13 +35,7 @@ NotedApp/Configuration/iOS/GoogleService-Info.plist
 NotedApp/Configuration/macOS/GoogleService-Info.plist
 ```
 
-These files are ignored by Git.
-
-Run `make project` after adding or replacing either file. XcodeGen scans each
-platform configuration directory for that file and includes it only for its
-matching destination, so the iOS and macOS files can share the required
-`GoogleService-Info.plist` bundle name without colliding. Clean checkouts and CI
-omit both files and continue to use Noted's demo fallback.
+These files are ignored by Git. XcodeGen includes each file only in its matching platform target, and clean checkouts continue to support local-only transcription.
 
 In Firebase Authentication, enable **Apple**. In the Apple Developer portal:
 
@@ -55,7 +46,7 @@ In Firebase Authentication, enable **Apple**. In the Apple Developer portal:
 
 ## 3. Generate and sign the Xcode project
 
-Noted requires Xcode 26.2 or newer.
+Noted requires Xcode 26.2 or newer and targets iOS 26/macOS 26.
 
 ```bash
 brew install xcodegen
@@ -67,13 +58,14 @@ In Xcode:
 
 1. Select the development team for both app targets.
 2. Confirm the bundle identifiers.
-3. Confirm the Sign in with Apple capability.
-4. Confirm microphone and background audio capabilities.
-5. Build and run once in the foreground before testing the Action Button.
+3. Confirm Sign in with Apple.
+4. Confirm microphone and background-audio capabilities.
+5. Build and launch once in the foreground.
+6. Grant microphone permission and let the current-language Apple speech model install.
 
 The macOS target uses App Sandbox with audio input, outgoing network, user-selected read/write files, and app-scoped security bookmarks.
 
-## 4. Configure backend parameters
+## 4. Configure and deploy the backend
 
 Install dependencies:
 
@@ -81,14 +73,7 @@ Install dependencies:
 npm --prefix functions ci
 ```
 
-The backend reads deploy-time configuration for:
-
-- Google Cloud project ID
-- Speech location, model, and default locale
-- Vertex AI location and Gemini model
-- maximum accepted recording size
-
-Defaults are set for `eu`, `chirp_3`, `en-GB`, and the repository's current stable Gemini Flash choice. Model names remain server-configurable so an app release is not required to change them.
+The backend reads deploy-time values for the Google Cloud project, Functions region, Vertex AI location, and Gemini model. Apple Speech has no backend key, recognizer, API enablement, or per-minute billing.
 
 Build and test:
 
@@ -101,32 +86,33 @@ npm --prefix functions run build
 Deploy:
 
 ```bash
-firebase deploy --only firestore:rules,firestore:indexes,storage,functions
+firebase deploy --only firestore:rules,firestore:indexes,functions
 ```
-
-After deployment, apply a Cloud Storage lifecycle rule that deletes abandoned temporary recordings after the agreed retention window.
 
 ## 5. App Check
 
-App Check enforcement is production hardening and is not enabled in this MVP. Before enforcement, add the Firebase App Check package product, configure a debug provider for local builds and App Attest or DeviceCheck where supported for production, then review metrics before enforcing it for Firestore, Storage, Authentication, and backend resources.
+App Check enforcement is production hardening and is not enabled in this MVP. Before enforcement, add Firebase App Check to the Apple target, use a debug provider locally and App Attest or DeviceCheck in production, review metrics, then enforce it for Firestore, Authentication, and backend resources.
 
 ## 6. Test the complete path
 
-1. Sign in with Apple.
-2. Grant microphone permission.
-3. Record a short conversation in Noted.
-4. Stop and verify the states move through Uploading, Transcribing, Creating notes, and Ready.
-5. Confirm the note and transcript are visible on both Apple devices.
-6. Pick an iCloud Drive or Obsidian folder and enable automatic export.
-7. Record again and confirm a deterministic Markdown file appears without pressing an export button.
-8. Configure the Action Button shortcut and repeat while the phone is locked.
-9. Test offline recording, interrupted upload, revoked folder access, duplicate backend delivery, and app relaunch.
+1. Launch Noted and grant microphone permission.
+2. Confirm the Apple speech-model preparation completes.
+3. Record and stop a short conversation while signed out.
+4. Verify the state moves to **Transcribing on device** and a timestamped local transcript appears.
+5. Confirm no audio object or Storage request is made.
+6. Sign in with Apple and verify **Syncing transcript → Creating note → Ready**.
+7. Confirm the note and transcript appear on a second signed-in Apple device.
+8. Select an iCloud Drive or Obsidian folder and confirm automatic Markdown export.
+9. Configure the Action Button and repeat while the iPhone is locked.
+10. Test offline capture, a long transcription interrupted by suspension, sign-in after capture, revoked folder access, and app relaunch.
 
 ## Known MVP limits
 
+- iOS 26/macOS 26 minimum.
 - No live transcription.
 - No system or third-party phone-call capture.
-- Exact word-level timestamps are not guaranteed.
-- Speaker identities are labels rather than named people.
-- Local folder export is eventually automatic but cannot run while iOS withholds execution after a force-quit.
-- Recordings longer than the configured Speech-to-Text batch envelope need client or backend segmentation.
+- No speaker identification or diarisation.
+- Timestamps are finalized-result ranges, not exact word offsets.
+- Locale and device support depend on Apple’s installed speech assets.
+- Long post-recording transcription can resume only when iOS next runs the app.
+- Local folder export is eventually automatic but cannot run while iOS withholds execution after force-quit.

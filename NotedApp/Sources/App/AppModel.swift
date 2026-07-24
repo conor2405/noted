@@ -32,11 +32,12 @@ final class AppModel: ObservableObject {
 
     private let persistence: LocalPersistence
     private let audioRecorder: AudioRecorder
+    private let transcriber: OnDeviceTranscriptionService
     private let cloud: FirebaseCloudRepository?
     private let folderExporter: FolderExportService
     private var startTask: Task<Void, Never>?
     private var hiddenMeetings: [Meeting] = []
-    private var isProcessingUploads = false
+    private var isProcessingRecordings = false
 
     private init(
         persistence: LocalPersistence = .shared,
@@ -47,6 +48,7 @@ final class AppModel: ObservableObject {
         self.firebaseConfigured = firebaseConfigured
         self.persistence = persistence
         self.audioRecorder = audioRecorder ?? AudioRecorder(persistence: persistence)
+        self.transcriber = OnDeviceTranscriptionService()
         self.folderExporter = folderExporter ?? FolderExportService(persistence: persistence)
         self.authentication = AuthenticationService(cloudConfigured: firebaseConfigured)
         self.cloud = firebaseConfigured ? FirebaseCloudRepository() : nil
@@ -103,6 +105,10 @@ final class AppModel: ObservableObject {
 
             if let userID = authentication.userID {
                 await userDidChange(userID)
+            } else {
+                Task { @MainActor [weak self] in
+                    await self?.processPendingRecordings()
+                }
             }
             await runPendingFolderExports()
         }
@@ -114,11 +120,6 @@ final class AppModel: ObservableObject {
     @discardableResult
     func toggleRecording(source: RecordingSource) async throws -> RecordingToggleResult {
         await start()
-        if case .actionButton = source,
-           firebaseConfigured,
-           !authentication.isSignedIn {
-            throw CloudRepositoryError.signedOut
-        }
         if audioRecorder.isRecording {
             let meetingID = try await finishRecording()
             return RecordingToggleResult(isRecording: false, meetingID: meetingID)
@@ -147,7 +148,7 @@ final class AppModel: ObservableObject {
     }
 
     func retryPendingWork() async {
-        await processPendingUploads(force: true)
+        await processPendingRecordings(force: true)
         await runPendingFolderExports(force: true)
     }
 
@@ -186,29 +187,31 @@ final class AppModel: ObservableObject {
             return
         }
 
-        guard
-            meeting.pipeline.upload == .failed,
-            let filename = meeting.localAudioFilename
-        else {
+        guard let filename = meeting.localAudioFilename else {
             await retryPendingWork()
             return
         }
 
-        let pending = PendingUpload(
+        let pending = PendingProcessing(
             meetingID: meeting.id,
             ownerUserID: meeting.ownerUserID,
             localAudioFilename: filename
         )
         do {
-            try await persistence.upsertPendingUpload(pending)
+            try await persistence.upsertPendingProcessing(pending)
         } catch {
             presentedError = error.localizedDescription
             return
         }
         if let index = meetings.firstIndex(where: { $0.id == meetingID }) {
-            meetings[index].pipeline.upload = .queued
-            meetings[index].pipeline.transcription = .queued
-            meetings[index].pipeline.note = .queued
+            if meetings[index].pipeline.transcription == .failed {
+                meetings[index].pipeline.transcription = .queued
+                meetings[index].pipeline.sync = .notStarted
+                meetings[index].pipeline.note = .notStarted
+            } else {
+                meetings[index].pipeline.sync = firebaseConfigured ? .queued : .notStarted
+                meetings[index].pipeline.note = firebaseConfigured ? .queued : .notStarted
+            }
             meetings[index].pipeline.message = nil
         }
         do {
@@ -217,16 +220,21 @@ final class AppModel: ObservableObject {
             // The durable queue is authoritative; continue and let processing update the state.
             presentedError = error.localizedDescription
         }
-        await processPendingUploads(force: true)
+        await processPendingRecordings(force: true)
     }
 
     func applicationBecameActive() async {
-        await processPendingUploads()
+        await processPendingRecordings()
         await runPendingFolderExports()
     }
 
     func prepareMicrophoneAccess() async {
         _ = await audioRecorder.prepareMicrophoneAccess()
+        do {
+            try await transcriber.prepareModel()
+        } catch {
+            presentedError = error.localizedDescription
+        }
     }
 
     func updateTitle(meetingID: UUID, title: String) async {
@@ -399,29 +407,23 @@ final class AppModel: ObservableObject {
         isRecording = false
         recordingElapsed = 0
 
-        guard firebaseConfigured else {
-            meetings[index].pipeline = PipelineState()
-            try await persistMeetings()
-            return result.meetingID
-        }
-
-        meetings[index].pipeline.upload = .queued
         meetings[index].pipeline.transcription = .queued
-        meetings[index].pipeline.note = .queued
-        let upload = PendingUpload(
+        meetings[index].pipeline.sync = firebaseConfigured ? .queued : .notStarted
+        meetings[index].pipeline.note = firebaseConfigured ? .queued : .notStarted
+        let pending = PendingProcessing(
             meetingID: result.meetingID,
             ownerUserID: meetings[index].ownerUserID,
             localAudioFilename: result.filename
         )
-        try await persistence.upsertPendingUpload(upload)
+        try await persistence.upsertPendingProcessing(pending)
         try await persistMeetings()
         applyAccountVisibility(userID: authentication.userID)
         if !meetings.contains(where: { $0.id == selectedMeetingID }) {
             selectedMeetingID = meetings.first?.id
         }
-        let backgroundLease = BackgroundTaskLease(name: "Upload Noted recording")
+        let backgroundLease = BackgroundTaskLease(name: "Transcribe Noted recording")
         Task { @MainActor [weak self] in
-            await self?.processPendingUploads()
+            await self?.processPendingRecordings()
             backgroundLease.end()
         }
         return result.meetingID
@@ -480,80 +482,99 @@ final class AppModel: ObservableObject {
         if let configuration = preferences.folderExport {
             try? await cloud.saveFolderExportRule(userID: userID, configuration: configuration)
         }
-        await processPendingUploads()
+        await enqueueUnsyncedMeetings(userID: userID)
+        Task { @MainActor [weak self] in
+            await self?.processPendingRecordings()
+        }
     }
 
-    private func processPendingUploads(force: Bool = false) async {
-        guard let userID = authentication.userID, let cloud else { return }
-        guard !isProcessingUploads else { return }
-        isProcessingUploads = true
-        defer {
-            isProcessingUploads = false
-            Task { @MainActor [weak self] in
-                guard let self, let currentUserID = self.authentication.userID else { return }
-                let remaining = await self.persistence.loadPendingUploads()
-                let hasDueWork = remaining.contains { upload in
-                    (upload.ownerUserID == nil || upload.ownerUserID == currentUserID)
-                        && self.meetings.contains(where: { $0.id == upload.meetingID })
-                        && upload.nextAttemptAt <= Date()
-                }
-                if hasDueWork {
-                    await self.processPendingUploads()
-                }
-            }
-        }
+    private func processPendingRecordings(force: Bool = false) async {
+        guard !isProcessingRecordings else { return }
+        isProcessingRecordings = true
+        defer { isProcessingRecordings = false }
 
-        let pending = await persistence.loadPendingUploads()
+        let pending = await persistence.loadPendingProcessing()
         let now = Date()
 
-        for var upload in pending {
-            guard authentication.userID == userID else { return }
-            guard force || upload.nextAttemptAt <= now else { continue }
-            guard upload.ownerUserID == nil || upload.ownerUserID == userID else { continue }
-            guard let currentMeeting = meetings.first(where: { $0.id == upload.meetingID }) else {
+        for var item in pending {
+            guard force || item.nextAttemptAt <= now else { continue }
+            guard let currentMeeting = meetings.first(where: { $0.id == item.meetingID }) else {
                 continue
             }
-            guard currentMeeting.ownerUserID == nil || currentMeeting.ownerUserID == userID
-            else { continue }
 
-            if upload.ownerUserID == nil || currentMeeting.ownerUserID == nil {
-                upload.ownerUserID = userID
-                if let index = meetings.firstIndex(where: { $0.id == upload.meetingID }) {
-                    meetings[index].ownerUserID = userID
-                }
-                try? await persistence.upsertPendingUpload(upload)
-                try? await persistMeetings()
-            }
-
-            let audioURL = await persistence.audioURL(filename: upload.localAudioFilename)
-            guard authentication.userID == userID else { return }
-            guard let progressIndex = meetings.firstIndex(where: { $0.id == upload.meetingID }) else {
+            let audioURL = await persistence.audioURL(filename: item.localAudioFilename)
+            guard let progressIndex = meetings.firstIndex(where: { $0.id == item.meetingID }) else {
                 continue
             }
-            meetings[progressIndex].pipeline.upload = .inProgress
-            meetings[progressIndex].pipeline.message = nil
-            let meetingToUpload = meetings[progressIndex]
-            try? await persistMeetings()
 
             do {
-                try await cloud.upload(
-                    meeting: meetingToUpload,
-                    audioURL: audioURL,
-                    userID: userID
-                )
+                if currentMeeting.pipeline.transcription != .completed
+                    || currentMeeting.transcript.isEmpty {
+                    meetings[progressIndex].pipeline.transcription = .inProgress
+                    meetings[progressIndex].pipeline.message = nil
+                    try? await persistMeetings()
+
+                    let segments = try await transcriber.transcribe(fileURL: audioURL)
+                    guard let resultIndex = meetings.firstIndex(where: {
+                        $0.id == item.meetingID
+                    }) else { continue }
+                    meetings[resultIndex].transcript = segments
+                    meetings[resultIndex].pipeline.transcription = .completed
+                    meetings[resultIndex].updatedAt = Date()
+                    try await persistMeetings()
+                }
+
+                guard firebaseConfigured, let cloud else {
+                    try await persistence.removePendingProcessing(meetingID: item.meetingID)
+                    if let localMeeting = meetings.first(where: { $0.id == item.meetingID }) {
+                        await enqueueFolderExportIfNeeded(localMeeting)
+                    }
+                    await runPendingFolderExports()
+                    continue
+                }
+                guard let userID = authentication.userID else {
+                    if let index = meetings.firstIndex(where: { $0.id == item.meetingID }) {
+                        meetings[index].pipeline.sync = .queued
+                    }
+                    try? await persistMeetings()
+                    continue
+                }
+                guard item.ownerUserID == nil || item.ownerUserID == userID else {
+                    continue
+                }
+                guard currentMeeting.ownerUserID == nil
+                        || currentMeeting.ownerUserID == userID else {
+                    continue
+                }
+
+                item.ownerUserID = userID
+                guard let syncIndex = meetings.firstIndex(where: { $0.id == item.meetingID }) else {
+                    continue
+                }
+                meetings[syncIndex].ownerUserID = userID
+                meetings[syncIndex].pipeline.sync = .inProgress
+                meetings[syncIndex].pipeline.note = .queued
+                meetings[syncIndex].pipeline.message = nil
+                try await persistence.upsertPendingProcessing(item)
+                try await persistMeetings()
+                let meetingToSync = meetings[syncIndex]
+
+                try await cloud.syncTranscript(meeting: meetingToSync, userID: userID)
                 guard authentication.userID == userID else { return }
-                if let resultIndex = meetings.firstIndex(where: { $0.id == upload.meetingID }) {
-                    meetings[resultIndex].pipeline.upload = .completed
-                    meetings[resultIndex].pipeline.transcription = .queued
+                if let resultIndex = meetings.firstIndex(where: { $0.id == item.meetingID }) {
+                    meetings[resultIndex].pipeline.sync = .completed
                     meetings[resultIndex].pipeline.note = .queued
                 }
-                try? await persistence.removePendingUpload(meetingID: upload.meetingID)
+                try await persistence.removePendingProcessing(meetingID: item.meetingID)
             } catch {
-                guard authentication.userID == userID else { return }
-                upload.registerFailure(error, now: now)
-                try? await persistence.upsertPendingUpload(upload)
-                if let resultIndex = meetings.firstIndex(where: { $0.id == upload.meetingID }) {
-                    meetings[resultIndex].pipeline.upload = .failed
+                item.registerFailure(error, now: now)
+                try? await persistence.upsertPendingProcessing(item)
+                if let resultIndex = meetings.firstIndex(where: { $0.id == item.meetingID }) {
+                    if meetings[resultIndex].pipeline.transcription == .inProgress {
+                        meetings[resultIndex].pipeline.transcription = .failed
+                    } else {
+                        meetings[resultIndex].pipeline.sync = .failed
+                    }
                     meetings[resultIndex].pipeline.message = error.localizedDescription
                 }
             }
@@ -590,8 +611,8 @@ final class AppModel: ObservableObject {
         try? await persistMeetings()
         guard authentication.userID == userID else { return }
 
-        for remote in remoteMeetings where remote.pipeline.upload == .completed {
-            try? await persistence.removePendingUpload(meetingID: remote.id)
+        for remote in remoteMeetings where remote.pipeline.sync == .completed {
+            try? await persistence.removePendingProcessing(meetingID: remote.id)
         }
         guard authentication.userID == userID else { return }
 
@@ -661,7 +682,7 @@ final class AppModel: ObservableObject {
             meetings[initialIndex].updatedAt = Date()
 
             guard let filename = meetings[initialIndex].localAudioFilename else {
-                meetings[initialIndex].pipeline.upload = .failed
+                meetings[initialIndex].pipeline.transcription = .failed
                 meetings[initialIndex].pipeline.message = "The interrupted recording has no local audio file."
                 continue
             }
@@ -671,7 +692,7 @@ final class AppModel: ObservableObject {
                 continue
             }
             guard FileManager.default.fileExists(atPath: url.path) else {
-                meetings[fileIndex].pipeline.upload = .failed
+                meetings[fileIndex].pipeline.transcription = .failed
                 meetings[fileIndex].pipeline.message = "The interrupted recording’s local audio file is missing."
                 continue
             }
@@ -690,15 +711,11 @@ final class AppModel: ObservableObject {
             guard let recoveredIndex = meetings.firstIndex(where: { $0.id == meetingID }) else {
                 continue
             }
-            guard firebaseConfigured else {
-                meetings[recoveredIndex].pipeline = PipelineState()
-                continue
-            }
-            meetings[recoveredIndex].pipeline.upload = .queued
             meetings[recoveredIndex].pipeline.transcription = .queued
-            meetings[recoveredIndex].pipeline.note = .queued
-            try? await persistence.upsertPendingUpload(
-                PendingUpload(
+            meetings[recoveredIndex].pipeline.sync = firebaseConfigured ? .queued : .notStarted
+            meetings[recoveredIndex].pipeline.note = firebaseConfigured ? .queued : .notStarted
+            try? await persistence.upsertPendingProcessing(
+                PendingProcessing(
                     meetingID: meetingID,
                     ownerUserID: meetings[recoveredIndex].ownerUserID,
                     localAudioFilename: filename
@@ -707,6 +724,22 @@ final class AppModel: ObservableObject {
         }
         if didRecover {
             try? await persistMeetings()
+        }
+    }
+
+    private func enqueueUnsyncedMeetings(userID: String) async {
+        for meeting in meetings where
+            meeting.pipeline.transcription == .completed
+                && meeting.pipeline.sync != .completed
+                && (meeting.ownerUserID == nil || meeting.ownerUserID == userID) {
+            guard let filename = meeting.localAudioFilename else { continue }
+            try? await persistence.upsertPendingProcessing(
+                PendingProcessing(
+                    meetingID: meeting.id,
+                    ownerUserID: meeting.ownerUserID,
+                    localAudioFilename: filename
+                )
+            )
         }
     }
 

@@ -152,7 +152,7 @@ struct MeetingDetailView: View {
             ContentUnavailableView(
                 "Transcript not ready",
                 systemImage: "text.bubble",
-                description: Text("Speaker-labelled segments appear here after transcription.")
+                description: Text("Timestamped text appears here after on-device transcription.")
             )
             .frame(maxWidth: .infinity)
             .padding(.vertical, 30)
@@ -204,7 +204,9 @@ struct MeetingDetailView: View {
         case .recording:
             "Stop the recording to begin processing."
         case .localOnly:
-            "This recording is stored locally. Sign in and configure Firebase to process it."
+            meeting.transcript.isEmpty
+                ? "The recording is stored locally and will be transcribed on this device."
+                : "The transcript is ready locally. Sign in to sync it and create a note."
         default:
             "Noted is creating a note from the transcript."
         }
@@ -212,7 +214,7 @@ struct MeetingDetailView: View {
 
     private var isProcessing: Bool {
         switch meeting.progress {
-        case .waitingToUpload, .uploading, .transcribing, .generatingNote:
+        case .transcribing, .waitingToSync, .syncing, .generatingNote:
             true
         default:
             false
@@ -220,11 +222,12 @@ struct MeetingDetailView: View {
     }
 
     private var canRetry: Bool {
-        model.firebaseConfigured
-            && model.signedInUserID != nil
-            && (meeting.pipeline.upload == .failed
-                || (meeting.pipeline.note == .failed
-                    && meeting.pipeline.transcription == .completed))
+        meeting.pipeline.transcription == .failed
+            || (model.firebaseConfigured
+                && model.signedInUserID != nil
+                && (meeting.pipeline.sync == .failed
+                    || (meeting.pipeline.note == .failed
+                        && meeting.pipeline.transcription == .completed)))
     }
 
     private var statusColor: Color {
@@ -248,9 +251,11 @@ private struct TranscriptSegmentView: View {
                 .frame(width: 54, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(segment.speakerLabel)
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
+                if !segment.speakerLabel.isEmpty {
+                    Text(segment.speakerLabel)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
                 Text(segment.text)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }

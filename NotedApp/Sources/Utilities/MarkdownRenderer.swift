@@ -29,7 +29,13 @@ enum MarkdownRenderer {
             } else {
                 for segment in meeting.transcript.sorted(by: { $0.sequence < $1.sequence }) {
                     let timestamp = TranscriptTimestampFormatter.string(milliseconds: segment.startMilliseconds)
-                    lines += ["**[\(timestamp)] \(segment.speakerLabel)**", "", segment.text, ""]
+                    let speaker = segment.speakerLabel.trimmingCharacters(
+                        in: .whitespacesAndNewlines
+                    )
+                    let heading = speaker.isEmpty
+                        ? "**[\(timestamp)]**"
+                        : "**[\(timestamp)] \(speaker)**"
+                    lines += [heading, "", segment.text, ""]
                 }
             }
         }

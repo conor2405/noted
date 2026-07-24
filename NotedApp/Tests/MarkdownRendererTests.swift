@@ -22,8 +22,8 @@ final class MarkdownRendererTests: XCTestCase {
                 )
             ],
             pipeline: PipelineState(
-                upload: .completed,
                 transcription: .completed,
+                sync: .completed,
                 note: .completed,
                 export: .notStarted
             )
@@ -54,6 +54,29 @@ final class MarkdownRendererTests: XCTestCase {
         XCTAssertTrue(first.hasSuffix("-12345678.md"))
         XCTAssertFalse(first.contains("/"))
         XCTAssertFalse(first.contains(":"))
+    }
+
+    func testAppleTranscriptOmitsEmptySpeakerLabel() {
+        let meeting = Meeting(
+            id: id,
+            title: "On-device transcript",
+            transcript: [
+                TranscriptSegment(
+                    sequence: 0,
+                    startMilliseconds: 5_000,
+                    text: "Apple Speech result."
+                )
+            ]
+        )
+
+        let markdown = MarkdownRenderer.render(
+            meeting: meeting,
+            includeNote: false,
+            includeTranscript: true
+        )
+
+        XCTAssertTrue(markdown.contains("**[00:05]**"))
+        XCTAssertFalse(markdown.contains("Speaker"))
     }
 
     func testDigestChangesWhenContentChanges() {

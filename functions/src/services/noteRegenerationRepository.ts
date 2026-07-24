@@ -290,10 +290,11 @@ export class NoteRegenerationRepository {
     return {
       segments,
       plainText: segments
-        .map(
-          (segment) =>
-            `[${formatTimestamp(segment.startMilliseconds)}] ${segment.speakerLabel}: ${segment.text}`,
-        )
+        .map((segment) => {
+          const speaker = segment.speakerLabel.trim();
+          const label = speaker === "" ? "" : `${speaker}: `;
+          return `[${formatTimestamp(segment.startMilliseconds)}] ${label}${segment.text}`;
+        })
         .join("\n"),
       durationMilliseconds:
         segments.at(-1)?.endMilliseconds ?? 0,
