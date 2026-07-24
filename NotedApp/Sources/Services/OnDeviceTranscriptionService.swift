@@ -41,9 +41,10 @@ actor OnDeviceTranscriptionService {
         let transcriber = makeTranscriber(locale: locale)
         try await ensureModel(for: transcriber, locale: locale)
 
+        let audioFile = try AVAudioFile(forReading: fileURL)
         async let segmentFuture = collectSegments(from: transcriber)
         let analyzer = SpeechAnalyzer(modules: [transcriber])
-        if let lastSample = try await analyzer.analyzeSequence(from: fileURL) {
+        if let lastSample = try await analyzer.analyzeSequence(from: audioFile) {
             try await analyzer.finalizeAndFinish(through: lastSample)
         } else {
             await analyzer.cancelAndFinishNow()
