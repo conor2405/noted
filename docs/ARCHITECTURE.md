@@ -2,55 +2,48 @@
 
 ## Ownership
 
-Noted uses Firebase as the cross-device source of truth and native storage only for device-specific state.
+Firebase is the cross-device source of truth for text artifacts. Audio and device capabilities remain native.
 
 | Data | Owner |
 |---|---|
-| Recording metadata and processing state | Cloud Firestore |
-| Generated note | Cloud Firestore |
-| Timestamped transcript chunks | Cloud Firestore subcollection |
-| User note preferences | Cloud Firestore |
 | Original M4A recording | Capturing device |
-| Temporary processing audio | Cloud Storage |
-| Pending uploads and folder exports | Capturing/exporting device |
+| Apple speech model | Apple-managed system storage |
+| Pending transcription and sync work | Capturing device |
+| Timestamped transcript chunks | Cloud Firestore after local transcription |
+| Generated note and processing state | Cloud Firestore |
+| User note preferences | Cloud Firestore |
+| Pending folder exports | Exporting device |
 | Folder security-scoped bookmark | Authorising device |
 
-CloudKit is deliberately not used. The Google processing backend already writes Firestore, and mirroring the same records into CloudKit would introduce a second identity, conflict model, and sync engine.
+CloudKit is deliberately not used. Firebase already owns identity, note generation, and synced artifacts; adding CloudKit would introduce a second conflict and reconciliation system.
 
 ## Processing flow
 
 ```text
 AVAudioRecorder
-    ↓ local M4A + pending manifest
-Firebase Storage
-    ↓ object-finalized event
-idempotent Firebase task
-    ↓
-Speech-to-Text V2 / chirp_3 / EU / en-GB
-    ↓ transcript chunks
+    ↓ local M4A + durable work item
+Apple SpeechAnalyzer / SpeechTranscriber
+    ↓ timestamped text, on device
 Cloud Firestore
-    ↓
+    ↓ completed-transcript event
 Gemini Flash + captured note preferences
     ↓ structured Markdown note
 Cloud Firestore
-    ├── Firestore listeners → Noted Note and Transcript views
-    └── export attempt → device AutoExportQueue → selected folder
+    ├── listeners → Noted Note and Transcript views
+    └── export attempt → device folder queue → selected folder
 ```
 
-The cloud copy of the audio is deleted only after the transcript and generated note are durably written. A lifecycle policy should also remove abandoned uploads.
+When Firebase is unavailable or the user is signed out, local transcription still completes. The queued transcript sync resumes after sign-in. No audio object, audio URL, or cloud audio retention path exists.
 
-## Client model
-
-The Apple targets share Swift source and use conditional compilation only for platform APIs such as `AVAudioSession` and macOS sandbox bookmark options.
-
-The client has four main boundaries:
+## Client boundaries
 
 - `AudioRecorder`: microphone permission and AVFoundation recording.
-- `FirebaseCloudRepository`: Firestore listeners, Storage uploads, preferences, and export receipts.
-- `AppModel`: presentation state and orchestration between recording, repository updates, and exports.
-- `FolderExportService`: security-scoped folder access, Markdown rendering, atomic coordinated writes, and idempotent retry state.
+- `OnDeviceTranscriptionService`: locale resolution, Apple model installation, file analysis, and timestamp extraction.
+- `FirebaseCloudRepository`: transcript-chunk sync, Firestore listeners, preferences, and export receipts.
+- `AppModel`: durable recording/transcription/sync orchestration.
+- `FolderExportService`: security-scoped folder access, Markdown rendering, atomic writes, and retries.
 
-Firestore offline persistence is the synced-data cache. Device-local operational state is stored separately and never treated as another cross-device database.
+Firestore offline persistence is the synced-data cache. Device-local operational state is stored separately and is never treated as another cross-device database.
 
 ## Firestore shape
 
@@ -58,49 +51,44 @@ Firestore offline persistence is the synced-data cache. Device-local operational
 users/{uid}
   preferences/default
   recordings/{recordingId}
-    transcriptChunks/{chunkId}
+    transcriptChunks/{sequence}
   exportRules/{ruleId}
   exportAttempts/{attemptId}
 
-processingJobs/{jobHash}           # server-only
-noteRegenerationJobs/{eventHash}   # server-only
+noteRegenerationJobs/{eventHash}   # server-only generation lease
 ```
 
-The recording document contains small list/detail fields including `noteTitle`, `noteMarkdown`, and the independent stage states:
+Recording documents include `syncState`, `transcriptionState`, `noteState`, and `exportState`. Transcript content is chunked to stay below Firestore’s document-size limit.
 
-- `uploadState`
-- `transcriptionState`
-- `noteState`
-- `exportState`
-
-Transcript content is chunked because Firestore documents have a 1 MiB limit. The UI can show the transcript as soon as transcription succeeds while note generation or export continues.
+The client creates an in-progress recording document, writes deterministic sequence-keyed chunks in bounded batches, then marks transcription and sync complete. The final update is the backend note-generation trigger. Firestore rules permit chunk writes only while the owning recording is in that in-progress state.
 
 ## Idempotency
 
-Storage and Firestore events may be delivered more than once. Every backend stage uses a stable key derived from the user ID, recording ID, Storage generation, stage, and artifact version. A retry may continue or replace the same artifact, but it must not create a second logical note or export.
+Local work items are keyed by recording ID. Transcript documents are keyed by sequence, and a stable transcript version ties the recording, chunks, and generated note together. A retry overwrites the same logical artifacts.
 
-Folder exports key receipts by destination and recording, and hash the rendered content plus relevant destination settings. A deterministic filename and atomic replacement make retries safe.
+Note generation uses a hash of the Firestore event ID as its lease/job ID. Folder-export receipts key by destination and recording, hash rendered content, and use deterministic filenames with atomic replacement.
 
-## Integration boundary
+## Timestamp and speaker policy
 
-Transcription and note generation always end in the same Firestore artifact. Destination-specific delivery starts after that boundary. The MVP registers device-folder export rules for Obsidian and other file-based workflows; the same `exportRules` and `exportAttempts` shape is reserved for direct Notion, ChatGPT, and future integrations without making any of them part of the core processing stack.
+`SpeechTranscriber` returns finalized result ranges through the `audioTimeRange` attribute. Noted stores those ranges as result-level timestamps; it does not promise word-level timing.
 
-## Timestamp policy
+Apple Speech does not expose speaker diarisation. `speakerLabel` remains an empty compatibility field in the transcript schema, is omitted in the UI and prompt text, and must not be presented as speaker identification.
 
-Chirp 3 batch recognition supports speaker diarisation but does not promise exact word-level timestamps. Noted stores speaker-labelled paragraph/result segments with start and end offsets. The UI and exports describe these as segment timestamps.
+## Model preparation and background behaviour
 
-## Background behaviour
+`SpeechTranscriber` is available from iOS 26 and macOS 26. The app resolves the current locale to a supported locale and asks `AssetInventory` to install its model during foreground onboarding. The model is Apple-managed and runs entirely on device.
 
-Recording uses the audio background mode. Processing continues on Google infrastructure after upload.
+Recording uses the audio background mode. Post-recording transcription receives only the background execution time iOS grants; a long file may pause when the process is suspended. The durable work item resumes on the next activation. Locked Action Button use therefore requires one prior foreground launch for microphone permission and speech-model preparation.
 
-A local folder can only be written by the authorised Apple device. The backend creates or updates the ready artifact; the client attempts the write while foregrounded, during granted background execution, and on each later activation. Immediate delivery is not guaranteed after the user force-quits the iOS app.
+A selected folder can be written only by an authorised Apple device. Immediate folder delivery is not guaranteed after force-quit, but the queue catches up automatically.
 
 ## Security
 
 - Sign in with Apple establishes a Firebase user ID.
-- Firestore and Storage rules restrict paths to that user ID.
-- App Check should be observed in development and enforced before production.
-- Raw audio is not stored in Firestore.
+- Audio never leaves the capturing device.
+- Firestore rules limit metadata and transcript writes to the authenticated owner.
+- Transcript chunks can be written only during the client’s bounded sync state.
 - Generated artifacts are readable only by their owner.
 - Folder bookmarks remain local to the device that received user consent.
-- Backend model and Speech credentials are available only to service accounts.
+- Gemini credentials are available only to the Functions service account.
+- App Check should be observed in development and enforced before production.

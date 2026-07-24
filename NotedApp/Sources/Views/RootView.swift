@@ -102,7 +102,7 @@ struct RootView: View {
 private struct LocalModeBanner: View {
     var body: some View {
         Label(
-            "Local demo mode — add Firebase configuration to enable processing and sync.",
+            "Local mode — transcription stays on device; add Firebase to generate and sync notes.",
             systemImage: "externaldrive"
         )
         .font(.caption)
@@ -119,7 +119,7 @@ private struct SignedOutBanner: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Sign in to process and sync recordings.")
+            Text("Sign in to sync transcripts and generate notes.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             SignInWithApple(authentication: authentication)
@@ -221,7 +221,7 @@ private struct MeetingRow: View {
 
     private var isProcessing: Bool {
         switch meeting.progress {
-        case .uploading, .transcribing, .generatingNote:
+        case .transcribing, .waitingToSync, .syncing, .generatingNote:
             true
         default:
             false

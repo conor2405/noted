@@ -2,23 +2,23 @@
 
 Noted is a native iPhone and Mac capture app for turning in-person conversations into useful notes in the systems people already use.
 
-The MVP records from the app or an iPhone Action Button shortcut, uploads a temporary processing copy, transcribes it with Google Cloud Speech-to-Text, creates a structured note with Gemini, and makes both the note and timestamped transcript available in Noted. A device can automatically write the result into a user-selected folder such as an Obsidian vault.
+The MVP records from the app or an iPhone Action Button shortcut, transcribes the local recording with Apple Speech, syncs only the timestamped text through Firebase, and creates a structured note with Gemini. Notes and transcripts remain visible in Noted and can be written automatically into a selected folder such as an Obsidian vault.
 
 ## MVP capabilities
 
-- Native SwiftUI apps for iOS 18+ and macOS 15+
-- In-app M4A recording with local audio retention
+- Native SwiftUI apps for iOS 26+ and macOS 26+
+- In-app M4A recording with device-local audio retention
 - `AudioRecordingIntent` and App Shortcut for the iPhone Action Button
+- Apple `SpeechAnalyzer` and `SpeechTranscriber` transcription, entirely on device
+- Result-level transcript timestamps
 - Sign in with Apple backed by Firebase Authentication
 - Firestore-backed cross-device notes and transcripts with offline caching
-- Google Speech-to-Text V2 `chirp_3` batch transcription
-- Speaker-labelled, paragraph-level transcript timestamps
-- Gemini-generated structured notes using a global preference and optional per-recording override
+- Gemini-generated notes using global and per-recording instructions
 - Automatic Markdown export into a persistent user-selected folder
-- Durable, idempotent upload and export queues
-- Local demo mode when Firebase configuration is absent
+- Durable, idempotent transcription, sync, and export queues
+- Local transcription when Firebase configuration or sign-in is absent
 
-Phone, FaceTime, and third-party call recording are intentionally outside this MVP.
+Apple Speech does not expose speaker diarisation, so the MVP does not show or promise speaker identification. Phone, FaceTime, and third-party call recording are also outside this MVP.
 
 ## Repository layout
 
@@ -29,7 +29,6 @@ docs/                     Architecture and setup documentation
 project.yml               XcodeGen project definition
 firebase.json             Firebase emulator and deployment configuration
 firestore.rules           Firestore access rules
-storage.rules             Temporary recording upload rules
 ```
 
 ## Quick start
@@ -48,7 +47,9 @@ make project
 open Noted.xcodeproj
 ```
 
-Without Firebase configuration, Noted launches in local demo mode so the recording and interface flows can be exercised. For a working cloud pipeline, follow [the setup guide](docs/SETUP.md).
+On first launch, grant microphone access and leave the app open while Apple installs the current-language speech model. The model lives in system storage, updates through Apple, and has no per-minute API charge.
+
+Without Firebase configuration, Noted records and transcribes locally. Add Firebase to sync the transcript and create Gemini notes; follow [the setup guide](docs/SETUP.md).
 
 ### Backend
 
@@ -65,27 +66,27 @@ npm --prefix functions run build
 firebase emulators:start
 ```
 
-Speech-to-Text and Gemini calls require deployed Google Cloud services; the pure transformation and state-machine code is covered by local tests.
+Only Gemini note generation requires a deployed Google Cloud model service. Audio is never uploaded.
 
 ## Action Button setup
 
-1. Launch Noted once, sign in, and grant microphone permission.
+1. Launch Noted once, grant microphone permission, and let the speech model install.
 2. Open **Settings → Action Button → Shortcut** on the iPhone.
 3. Select **Noted → Toggle Recording**.
 4. Hold the Action Button once to start and again to stop.
 
-The original audio remains on the recording device. Notes and transcripts sync through Firestore.
+Recording and transcription work without signing in. Sign in is required to sync a transcript and generate a Gemini note. If iOS ends background execution before a long file finishes, Noted’s durable queue resumes automatically the next time the app runs.
 
 ## Automatic folder export
 
 In Noted settings, enable automatic export and choose a writable folder. Noted stores a device-local security-scoped bookmark and writes one deterministic Markdown file per completed recording.
 
-iOS controls background execution. Export normally happens as soon as processing finishes, but if Noted is suspended or force-quit, the durable queue completes the export the next time the app receives execution. No manual export action is required.
+iOS controls background execution. Export normally happens as soon as processing finishes, but after suspension or force-quit the durable queue catches up the next time Noted receives execution.
 
 ## Integration boundary
 
-Processing is deliberately independent from destinations. The MVP’s automatic Markdown-folder integration covers Obsidian, iCloud Drive, and other file-based workflows. Firestore export rules and attempts provide the handoff boundary for direct Notion, ChatGPT, and additional destinations; provider authorization and delivery workers are follow-up integrations rather than dependencies of recording, transcription, or note generation.
+The MVP’s automatic Markdown-folder integration covers Obsidian, iCloud Drive, and other file-based workflows. Firestore export rules and attempts provide the boundary for direct Notion, ChatGPT, and future destinations; provider authentication and delivery workers remain follow-up integrations.
 
 ## Development status
 
-This is an MVP foundation. Before App Store distribution it still needs a configured Firebase project, Apple signing, physical-device Action Button validation, production privacy copy, and end-to-end testing against real meeting audio.
+This is an MVP foundation. Before App Store distribution it still needs a configured Firebase project, Apple signing, physical-device Action Button and speech-model testing, production privacy copy, and evaluation against representative meeting audio.

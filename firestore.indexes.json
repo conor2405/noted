@@ -1,20 +1,6 @@
 {
   "indexes": [
     {
-      "collectionGroup": "recordings",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "transcriptionState",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "createdAt",
-          "order": "DESCENDING"
-        }
-      ]
-    },
-    {
       "collectionGroup": "transcriptChunks",
       "queryScope": "COLLECTION",
       "fields": [
@@ -38,20 +24,6 @@
         },
         {
           "fieldPath": "createdAt",
-          "order": "ASCENDING"
-        }
-      ]
-    },
-    {
-      "collectionGroup": "processingJobs",
-      "queryScope": "COLLECTION",
-      "fields": [
-        {
-          "fieldPath": "status",
-          "order": "ASCENDING"
-        },
-        {
-          "fieldPath": "cleanupEligibleAt",
           "order": "ASCENDING"
         }
       ]

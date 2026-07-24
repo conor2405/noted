@@ -2,7 +2,7 @@
 import AppIntents
 import Foundation
 
-@available(iOS 18.0, *)
+@available(iOS 26.0, *)
 struct ToggleNotedRecordingIntent: AudioRecordingIntent {
     static let title: LocalizedStringResource = "Toggle Noted Recording"
     static let description = IntentDescription(
@@ -22,17 +22,13 @@ struct ToggleNotedRecordingIntent: AudioRecordingIntent {
             return .result(
                 dialog: "Open Noted once and allow microphone access before using the Action Button."
             )
-        } catch CloudRepositoryError.signedOut {
-            return .result(
-                dialog: "Open Noted and sign in before using the Action Button."
-            )
         } catch {
             return .result(dialog: "Noted could not change the recording state. Open the app to try again.")
         }
     }
 }
 
-@available(iOS 18.0, *)
+@available(iOS 26.0, *)
 struct NotedAppShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(

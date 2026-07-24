@@ -43,18 +43,66 @@ enum WorkState: String, Codable, CaseIterable, Sendable {
 }
 
 struct PipelineState: Codable, Hashable, Sendable {
-    var upload: WorkState = .notStarted
     var transcription: WorkState = .notStarted
+    var sync: WorkState = .notStarted
     var note: WorkState = .notStarted
     var export: WorkState = .notStarted
     var message: String?
+
+    init(
+        transcription: WorkState = .notStarted,
+        sync: WorkState = .notStarted,
+        note: WorkState = .notStarted,
+        export: WorkState = .notStarted,
+        message: String? = nil
+    ) {
+        self.transcription = transcription
+        self.sync = sync
+        self.note = note
+        self.export = export
+        self.message = message
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case transcription
+        case sync
+        case legacyUpload = "upload"
+        case note
+        case export
+        case message
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        transcription = try container.decodeIfPresent(
+            WorkState.self,
+            forKey: .transcription
+        ) ?? .notStarted
+        sync = try container.decodeIfPresent(WorkState.self, forKey: .sync)
+            ?? container.decodeIfPresent(WorkState.self, forKey: .legacyUpload)
+            ?? .notStarted
+        note = try container.decodeIfPresent(WorkState.self, forKey: .note)
+            ?? .notStarted
+        export = try container.decodeIfPresent(WorkState.self, forKey: .export)
+            ?? .notStarted
+        message = try container.decodeIfPresent(String.self, forKey: .message)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(transcription, forKey: .transcription)
+        try container.encode(sync, forKey: .sync)
+        try container.encode(note, forKey: .note)
+        try container.encode(export, forKey: .export)
+        try container.encodeIfPresent(message, forKey: .message)
+    }
 }
 
 enum MeetingProgress: Equatable, Sendable {
     case recording
-    case waitingToUpload
-    case uploading
     case transcribing
+    case waitingToSync
+    case syncing
     case generatingNote
     case ready
     case failed(String?)
@@ -63,9 +111,9 @@ enum MeetingProgress: Equatable, Sendable {
     var label: String {
         switch self {
         case .recording: "Recording"
-        case .waitingToUpload: "Waiting to upload"
-        case .uploading: "Uploading"
-        case .transcribing: "Transcribing"
+        case .transcribing: "Transcribing on device"
+        case .waitingToSync: "Waiting to sync"
+        case .syncing: "Syncing transcript"
         case .generatingNote: "Creating note"
         case .ready: "Ready"
         case .failed: "Needs attention"
@@ -76,9 +124,9 @@ enum MeetingProgress: Equatable, Sendable {
     var systemImage: String {
         switch self {
         case .recording: "waveform.circle.fill"
-        case .waitingToUpload: "clock.arrow.circlepath"
-        case .uploading: "arrow.up.circle"
         case .transcribing: "text.bubble"
+        case .waitingToSync: "clock.arrow.circlepath"
+        case .syncing: "arrow.triangle.2.circlepath"
         case .generatingNote: "sparkles"
         case .ready: "checkmark.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
@@ -100,7 +148,7 @@ struct TranscriptSegment: Identifiable, Codable, Hashable, Sendable {
         sequence: Int,
         startMilliseconds: Int,
         endMilliseconds: Int? = nil,
-        speakerLabel: String = "Speaker",
+        speakerLabel: String = "",
         text: String
     ) {
         self.id = id
@@ -168,7 +216,7 @@ struct Meeting: Identifiable, Codable, Hashable, Sendable {
             return .recording
         }
 
-        if pipeline.upload == .failed || pipeline.transcription == .failed || pipeline.note == .failed {
+        if pipeline.transcription == .failed || pipeline.sync == .failed || pipeline.note == .failed {
             return .failed(pipeline.message)
         }
 
@@ -176,16 +224,16 @@ struct Meeting: Identifiable, Codable, Hashable, Sendable {
             return .ready
         }
 
-        if pipeline.upload == .inProgress {
-            return .uploading
-        }
-
-        if pipeline.upload == .queued {
-            return .waitingToUpload
-        }
-
         if pipeline.transcription == .inProgress || pipeline.transcription == .queued {
             return .transcribing
+        }
+
+        if pipeline.sync == .inProgress {
+            return .syncing
+        }
+
+        if pipeline.sync == .queued {
+            return .waitingToSync
         }
 
         if pipeline.note == .inProgress || (pipeline.transcription == .completed && pipeline.note != .completed) {
@@ -238,27 +286,24 @@ extension Meeting {
                 sequence: 0,
                 startMilliseconds: 0,
                 endMilliseconds: 8_400,
-                speakerLabel: "Speaker 1",
                 text: "For the MVP, recording can process as soon as the user stops."
             ),
             TranscriptSegment(
                 sequence: 1,
                 startMilliseconds: 8_400,
                 endMilliseconds: 19_700,
-                speakerLabel: "Speaker 2",
                 text: "Agreed. The generated note and transcript should both remain visible in Noted."
             ),
             TranscriptSegment(
                 sequence: 2,
                 startMilliseconds: 19_700,
                 endMilliseconds: 31_200,
-                speakerLabel: "Speaker 1",
                 text: "And completed meetings should export automatically to the selected folder."
             )
         ],
         pipeline: PipelineState(
-            upload: .completed,
             transcription: .completed,
+            sync: .completed,
             note: .completed,
             export: .notStarted
         ),

@@ -8,17 +8,30 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid == uid;
     }
 
-    function validRecordingCreate(uid, recordingId) {
+    function validTranscriptMetadata(uid) {
       return request.resource.data.ownerUid == uid
-        && request.resource.data.audioStoragePath
-          == "recordings/" + uid + "/" + recordingId + "/source.m4a"
-        && request.resource.data.uploadState == "in_progress"
-        && request.resource.data.transcriptionState == "queued"
+        && request.resource.data.title is string
+        && request.resource.data.title.size() <= 500
+        && request.resource.data.noteInstructions is string
+        && request.resource.data.noteInstructions.size() <= 20000
+        && request.resource.data.durationMilliseconds is int
+        && request.resource.data.durationMilliseconds >= 0
+        && request.resource.data.transcriptVersion is string
+        && request.resource.data.transcriptVersion.size() > 0
+        && request.resource.data.transcriptSegmentCount is int
+        && request.resource.data.transcriptSegmentCount > 0
+        && request.resource.data.transcriptSegmentCount <= 10000
+        && request.resource.data.transcriptSource == "apple_speech_analyzer";
+    }
+
+    function validRecordingCreate(uid) {
+      return validTranscriptMetadata(uid)
+        && request.resource.data.syncState == "in_progress"
+        && request.resource.data.transcriptionState == "in_progress"
         && request.resource.data.noteState == "queued"
         && request.resource.data.exportState == "not_started"
-        && request.resource.data.title is string
-        && request.resource.data.noteInstructions is string
         && !request.resource.data.keys().hasAny([
+          "audioStoragePath",
           "noteVersion",
           "noteMarkdown",
           "noteTitle",
@@ -37,6 +50,31 @@ service cloud.firestore {
         );
     }
 
+    function validTranscriptSyncUpdate(uid) {
+      return resource.data.ownerUid == uid
+        && resource.data.transcriptionState != "completed"
+        && validTranscriptMetadata(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "title",
+          "durationMilliseconds",
+          "noteInstructions",
+          "transcriptVersion",
+          "transcriptSegmentCount",
+          "transcriptSource",
+          "syncState",
+          "transcriptionState",
+          "noteState",
+          "processingError",
+          "errorMessage",
+          "updatedAt"
+        ])
+        && request.resource.data.syncState in ["in_progress", "completed"]
+        && request.resource.data.transcriptionState in ["in_progress", "completed"]
+        && request.resource.data.syncState
+          == request.resource.data.transcriptionState
+        && request.resource.data.noteState == "queued";
+    }
+
     function validRecordingClientUpdate(uid) {
       return request.resource.data.ownerUid == uid
         && resource.data.ownerUid == uid
@@ -48,7 +86,9 @@ service cloud.firestore {
           "updatedAt"
         ])
         && request.resource.data.title is string
+        && request.resource.data.title.size() <= 500
         && request.resource.data.noteInstructions is string
+        && request.resource.data.noteInstructions.size() <= 20000
         && validNoteRegenerationTransition()
         && request.resource.data.exportState in [
           "not_started",
@@ -57,6 +97,65 @@ service cloud.firestore {
           "completed",
           "failed"
         ];
+    }
+
+    function parentRecording(uid, recordingId) {
+      return get(
+        /databases/$(database)/documents/users/$(uid)/recordings/$(recordingId)
+      );
+    }
+
+    function validTranscriptChunk(uid, recordingId) {
+      let parent = parentRecording(uid, recordingId);
+      return parent.data.ownerUid == uid
+        && parent.data.transcriptionState == "in_progress"
+        && request.resource.data.keys().hasAll([
+          "processingJobId",
+          "sequence",
+          "startMilliseconds",
+          "speakerLabel",
+          "text",
+          "confidence",
+          "languageCode",
+          "timestampPrecision",
+          "source"
+        ])
+        && request.resource.data.keys().hasOnly([
+          "processingJobId",
+          "sequence",
+          "startMilliseconds",
+          "endMilliseconds",
+          "speakerLabel",
+          "text",
+          "confidence",
+          "languageCode",
+          "timestampPrecision",
+          "source"
+        ])
+        && request.resource.data.processingJobId
+          == parent.data.transcriptVersion
+        && request.resource.data.sequence is int
+        && request.resource.data.sequence >= 0
+        && request.resource.data.sequence
+          < parent.data.transcriptSegmentCount
+        && request.resource.data.startMilliseconds is int
+        && request.resource.data.startMilliseconds >= 0
+        && (
+          !request.resource.data.keys().hasAny(["endMilliseconds"])
+          || (
+            request.resource.data.endMilliseconds is int
+            && request.resource.data.endMilliseconds
+              >= request.resource.data.startMilliseconds
+          )
+        )
+        && request.resource.data.speakerLabel == ""
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 20000
+        && request.resource.data.confidence == null
+        && request.resource.data.languageCode is string
+        && request.resource.data.timestampPrecision == "result"
+        && request.resource.data.source == "apple_speech_analyzer";
     }
 
     function validExportRule() {
@@ -82,14 +181,19 @@ service cloud.firestore {
       match /recordings/{recordingId} {
         allow read: if signedInAs(uid);
         allow create: if signedInAs(uid)
-          && validRecordingCreate(uid, recordingId);
+          && validRecordingCreate(uid);
         allow update: if signedInAs(uid)
-          && validRecordingClientUpdate(uid);
+          && (
+            validTranscriptSyncUpdate(uid)
+            || validRecordingClientUpdate(uid)
+          );
         allow delete: if false;
 
         match /transcriptChunks/{chunkId} {
           allow read: if signedInAs(uid);
-          allow write: if false;
+          allow create, update: if signedInAs(uid)
+            && validTranscriptChunk(uid, recordingId);
+          allow delete: if false;
         }
       }
 
@@ -126,10 +230,6 @@ service cloud.firestore {
           ];
         allow delete: if signedInAs(uid);
       }
-    }
-
-    match /processingJobs/{jobId} {
-      allow read, write: if false;
     }
 
     match /noteRegenerationJobs/{jobId} {

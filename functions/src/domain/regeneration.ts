@@ -4,16 +4,21 @@ export interface NoteStateSnapshot {
 }
 
 /**
- * Only an explicit client transition requests regeneration. Backend writes
- * (`queued` -> `in_progress` -> `completed`/`failed`) cannot loop back in.
+ * Generate once when the client finishes syncing an on-device transcript, or
+ * regenerate after an explicit completed/failed -> queued request. Backend
+ * writes (`queued` -> `in_progress` -> `completed`/`failed`) cannot loop.
  */
-export function isNoteRegenerationTransition(
+export function isNoteGenerationTransition(
   before: NoteStateSnapshot,
   after: NoteStateSnapshot,
 ): boolean {
   return (
-    (before.noteState === "completed" || before.noteState === "failed") &&
     after.noteState === "queued" &&
-    after.transcriptionState === "completed"
+    after.transcriptionState === "completed" &&
+    (
+      before.transcriptionState !== "completed" ||
+      before.noteState === "completed" ||
+      before.noteState === "failed"
+    )
   );
 }
