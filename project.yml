@@ -111,7 +111,9 @@ targets:
         MACOSX_DEPLOYMENT_TARGET: "15.0"
         PRODUCT_BUNDLE_IDENTIFIER: com.conor2405.noted.tests
         PRODUCT_MODULE_NAME: NotedAppTests
+        "BUNDLE_LOADER[sdk=macosx*]": "$(TEST_HOST)"
         "PRODUCT_BUNDLE_IDENTIFIER[sdk=macosx*]": com.conor2405.noted.macos.tests
+        "TEST_HOST[sdk=macosx*]": "$(BUILT_PRODUCTS_DIR)/NotedApp.app/Contents/MacOS/NotedApp"
 
 schemes:
   NotedApp:
