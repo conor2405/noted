@@ -38,7 +38,7 @@ storage.rules             Temporary recording upload rules
 
 Requirements:
 
-- macOS with Xcode
+- macOS with Xcode 26.2 or newer
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 - An Apple Developer team for device testing of Sign in with Apple and App Intents
 
@@ -82,7 +82,10 @@ In Noted settings, enable automatic export and choose a writable folder. Noted s
 
 iOS controls background execution. Export normally happens as soon as processing finishes, but if Noted is suspended or force-quit, the durable queue completes the export the next time the app receives execution. No manual export action is required.
 
+## Integration boundary
+
+Processing is deliberately independent from destinations. The MVP’s automatic Markdown-folder integration covers Obsidian, iCloud Drive, and other file-based workflows. Firestore export rules and attempts provide the handoff boundary for direct Notion, ChatGPT, and additional destinations; provider authorization and delivery workers are follow-up integrations rather than dependencies of recording, transcription, or note generation.
+
 ## Development status
 
 This is an MVP foundation. Before App Store distribution it still needs a configured Firebase project, Apple signing, physical-device Action Button validation, production privacy copy, and end-to-end testing against real meeting audio.
-
