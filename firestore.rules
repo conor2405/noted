@@ -1,0 +1,143 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Enable App Check enforcement for Firestore in the Firebase console.
+    // Rules still require Firebase Authentication and strict ownership.
+    function signedInAs(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function validRecordingCreate(uid, recordingId) {
+      return request.resource.data.ownerUid == uid
+        && request.resource.data.audioStoragePath
+          == "recordings/" + uid + "/" + recordingId + "/source.m4a"
+        && request.resource.data.uploadState == "in_progress"
+        && request.resource.data.transcriptionState == "queued"
+        && request.resource.data.noteState == "queued"
+        && request.resource.data.exportState == "not_started"
+        && request.resource.data.title is string
+        && request.resource.data.noteInstructions is string
+        && !request.resource.data.keys().hasAny([
+          "noteVersion",
+          "noteMarkdown",
+          "noteTitle",
+          "note"
+        ]);
+    }
+
+    function validNoteRegenerationTransition() {
+      return (
+          request.resource.data.noteState == resource.data.noteState
+        ) || (
+          resource.data.noteState in ["completed", "failed"]
+          && request.resource.data.noteState == "queued"
+          && resource.data.transcriptionState == "completed"
+          && request.resource.data.transcriptionState == "completed"
+        );
+    }
+
+    function validRecordingClientUpdate(uid) {
+      return request.resource.data.ownerUid == uid
+        && resource.data.ownerUid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          "title",
+          "noteInstructions",
+          "noteState",
+          "exportState",
+          "updatedAt"
+        ])
+        && request.resource.data.title is string
+        && request.resource.data.noteInstructions is string
+        && validNoteRegenerationTransition()
+        && request.resource.data.exportState in [
+          "not_started",
+          "waiting_for_device",
+          "in_progress",
+          "completed",
+          "failed"
+        ];
+    }
+
+    function validExportRule() {
+      return request.resource.data.enabled is bool
+        && request.resource.data.destinationType in [
+          "folder",
+          "share",
+          "notion",
+          "chatgpt"
+        ]
+        && request.resource.data.includeNotes is bool
+        && request.resource.data.includeTranscript is bool;
+    }
+
+    match /users/{uid} {
+      allow read, create, update: if signedInAs(uid);
+      allow delete: if false;
+
+      match /preferences/{preferenceId} {
+        allow read, create, update, delete: if signedInAs(uid);
+      }
+
+      match /recordings/{recordingId} {
+        allow read: if signedInAs(uid);
+        allow create: if signedInAs(uid)
+          && validRecordingCreate(uid, recordingId);
+        allow update: if signedInAs(uid)
+          && validRecordingClientUpdate(uid);
+        allow delete: if false;
+
+        match /transcriptChunks/{chunkId} {
+          allow read: if signedInAs(uid);
+          allow write: if false;
+        }
+      }
+
+      match /exportRules/{ruleId} {
+        allow read: if signedInAs(uid);
+        allow create, update: if signedInAs(uid) && validExportRule();
+        allow delete: if signedInAs(uid);
+      }
+
+      match /exportAttempts/{attemptId} {
+        allow read: if signedInAs(uid);
+        allow create: if false;
+        allow update: if signedInAs(uid)
+          && request.resource.data.recordingId == resource.data.recordingId
+          && request.resource.data.processingJobId
+            == resource.data.processingJobId
+          && request.resource.data.ruleId == resource.data.ruleId
+          && request.resource.data.destinationType
+            == resource.data.destinationType
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            "state",
+            "deviceId",
+            "claimedAt",
+            "exportedAt",
+            "outputPath",
+            "error",
+            "updatedAt"
+          ])
+          && request.resource.data.state in [
+            "waiting_for_device",
+            "in_progress",
+            "completed",
+            "failed"
+          ];
+        allow delete: if signedInAs(uid);
+      }
+    }
+
+    match /processingJobs/{jobId} {
+      allow read, write: if false;
+    }
+
+    match /noteRegenerationJobs/{jobId} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
