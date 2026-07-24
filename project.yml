@@ -81,7 +81,7 @@ targets:
         OTHER_LDFLAGS: "$(inherited) -ObjC"
         PRODUCT_BUNDLE_IDENTIFIER: com.conor2405.noted
         PRODUCT_MODULE_NAME: NotedApp
-        PRODUCT_NAME: Noted
+        PRODUCT_NAME: NotedApp
         SUPPORTS_MACCATALYST: NO
         TARGETED_DEVICE_FAMILY: "1,2"
         "CODE_SIGN_ENTITLEMENTS[sdk=macosx*]": NotedApp/Configuration/macOS/NotedApp.entitlements
